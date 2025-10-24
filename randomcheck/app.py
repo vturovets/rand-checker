@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import math
 import sys
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from .config import RandomCheckConfig, load_config
 from .errors import InvalidConfigurationError, TestExecutionError
 from .io import EntryType, InputData, read_input_file
+from .tests import DEFAULT_TESTS, RandomnessTest, build_test_suite
 
 
 @dataclass(frozen=True)
@@ -44,80 +43,17 @@ class RunResult:
     test_results: Sequence[TestResult]
 
 
-class _BaseTest:
-    """Base class for the built-in heuristics."""
-
-    name: str
-    supported_entry_types: Tuple[EntryType, ...] = (
-        "numeric",
-        "alphabetic",
-        "alphanumeric",
-        "mixed",
-    )
-
-    def run(self, entries: Sequence[str]) -> Tuple[float, str]:
-        raise NotImplementedError
-
-
-class _DiversityTest(_BaseTest):
-    name = "diversity"
-
-    def run(self, entries: Sequence[str]) -> Tuple[float, str]:
-        total = len(entries)
-        if total == 0:
-            return 0.0, "No entries provided."
-        unique_count = len(set(entries))
-        score = unique_count / total
-        details = f"{unique_count} unique entries out of {total}."
-        return score, details
-
-
-class _RunsVariationTest(_BaseTest):
-    name = "runs"
-
-    def run(self, entries: Sequence[str]) -> Tuple[float, str]:
-        total = len(entries)
-        if total <= 1:
-            return 1.0, "Not enough data for runs analysis; treating as ideal."
-        changes = sum(1 for idx in range(1, total) if entries[idx] != entries[idx - 1])
-        score = changes / (total - 1)
-        details = f"{changes} transitions across {total - 1} comparisons."
-        return score, details
-
-
-class _EntropyTest(_BaseTest):
-    name = "entropy"
-
-    def run(self, entries: Sequence[str]) -> Tuple[float, str]:
-        total = len(entries)
-        if total == 0:
-            return 0.0, "No entries available for entropy calculation."
-        counts = Counter(entries)
-        probabilities = [count / total for count in counts.values()]
-        entropy = -sum(p * math.log2(p) for p in probabilities if p > 0)
-        unique = len(counts)
-        if unique <= 1:
-            return 0.0, "Entropy is zero because only a single unique entry was found."
-        max_entropy = math.log2(unique)
-        score = entropy / max_entropy if max_entropy > 0 else 0.0
-        details = (
-            f"Computed entropy {entropy:.3f} bits across {unique} unique entries (max {max_entropy:.3f})."
-        )
-        return score, details
-
-
-DEFAULT_TESTS: Tuple[_BaseTest, ...] = (
-    _DiversityTest(),
-    _RunsVariationTest(),
-    _EntropyTest(),
-)
-
-
 class RandomnessCheckerApp:
     """High level service wiring configuration, execution, and rendering."""
 
-    def __init__(self, tests: Sequence[_BaseTest] | None = None) -> None:
-        self._tests = {test.name: test for test in (tests or DEFAULT_TESTS)}
+    def __init__(self, tests: Sequence[RandomnessTest] | Mapping[str, RandomnessTest] | None = None) -> None:
+        if tests is None:
+            available: Iterable[RandomnessTest] = DEFAULT_TESTS.values()
+        elif isinstance(tests, Mapping):
+            available = tests.values()
+        else:
+            available = tests
+        self._tests: Dict[str, RandomnessTest] = {test.name: test for test in available}
 
     # ------------------------------------------------------------------
     # Public API
@@ -135,7 +71,7 @@ class RandomnessCheckerApp:
         config = self._load_config(config_path)
         for warning in config.warnings:
             print(f"Warning: {warning}", file=sys.stderr)
-        active_tests = self._resolve_tests(config, input_data.entry_type)
+        active_tests = self._resolve_tests(config, input_data)
         threshold = self._resolve_threshold(config)
         effective_report = report_path or config.output.report_path
         verbose_output = verbose or config.output.log_results
@@ -161,26 +97,9 @@ class RandomnessCheckerApp:
         return load_config(path)
 
     def _resolve_tests(
-        self, config: RandomCheckConfig, entry_type: EntryType
-    ) -> List[Tuple[_BaseTest, float]]:
-        active_tests: List[Tuple[_BaseTest, float]] = []
-        for name in config.tests.enabled_tests:
-            if name not in self._tests:
-                raise InvalidConfigurationError(f"Unknown test '{name}' in configuration.")
-            weight = config.weights.values.get(name)
-            if weight is None:
-                raise InvalidConfigurationError(
-                    f"No weight provided for enabled test '{name}'."
-                )
-            test = self._tests[name]
-            if entry_type not in test.supported_entry_types:
-                raise InvalidConfigurationError(
-                    f"Test '{name}' is not compatible with detected input type '{entry_type}'."
-                )
-            active_tests.append((test, weight))
-        if not active_tests:
-            raise InvalidConfigurationError("At least one test must be enabled in the configuration.")
-        return active_tests
+        self, config: RandomCheckConfig, input_data: InputData
+    ) -> List[Tuple[RandomnessTest, float]]:
+        return build_test_suite(config, input_data, registry=self._tests)
 
     def _resolve_threshold(self, config: RandomCheckConfig) -> float:
         return config.output.confidence_threshold
@@ -190,20 +109,26 @@ class RandomnessCheckerApp:
         input_path: Path,
         config_path: Path,
         input_data: InputData,
-        tests: Sequence[Tuple[_BaseTest, float]],
+        tests: Sequence[Tuple[RandomnessTest, float]],
         threshold: float,
     ) -> RunResult:
         test_results: List[TestResult] = []
         total_weight = 0.0
         weighted_score = 0.0
-        entries = input_data.entries
         for test, weight in tests:
             try:
-                score, details = test.run(entries)
+                outcome = test.run(input_data)
             except Exception as exc:  # pragma: no cover - defensive guard
                 raise TestExecutionError(f"Test '{test.name}' failed to execute.") from exc
-            score = max(0.0, min(1.0, float(score)))
-            test_results.append(TestResult(name=test.name, score=score, weight=weight, details=details))
+            score = max(0.0, min(1.0, float(outcome.p_value)))
+            test_results.append(
+                TestResult(
+                    name=test.name,
+                    score=score,
+                    weight=weight,
+                    details=outcome.details,
+                )
+            )
             total_weight += weight
             weighted_score += score * weight
         overall_score = weighted_score / total_weight if total_weight > 0 else 0.0
