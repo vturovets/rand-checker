@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rand-checker"
+version = "0.1.0"
+description = "Configurable randomness checker with optional vectorised acceleration"
+readme = "README.md"
+authors = [{ name = "Random Checker Team" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+science = ["numpy>=1.24"]
+
+[project.scripts]
+randomcheck = "randomcheck.__main__:main"
+
+[tool.setuptools]
+packages = ["randomcheck", "randomcheck.tests"]
