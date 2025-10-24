@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-"""Input/output helpers for reading and classifying randomness data files."""
-
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 from typing import Iterable, Literal, Tuple
 
@@ -67,7 +66,7 @@ def read_input_file(path: Path | str, *, max_entries: int = DEFAULT_MAX_ENTRIES)
     except OSError as exc:  # pragma: no cover - filesystem guard
         raise MissingFileError(f"Could not read input file: {candidate}") from exc
 
-    entries = tuple(line.rstrip("\r\n") for line in raw_lines)
+    entries = _strip_newlines(raw_lines)
     if not entries or all(not entry.strip() for entry in entries):
         raise EmptyInputFileError(
             f"Input file '{candidate}' does not contain any non-empty entries."
@@ -85,17 +84,32 @@ def read_input_file(path: Path | str, *, max_entries: int = DEFAULT_MAX_ENTRIES)
 def classify_entries(entries: Iterable[str]) -> EntryType:
     """Infer the dominant data type for the provided ``entries``."""
 
-    categories = {_classify_entry(entry) for entry in entries}
-    categories.discard("empty")
-    if not categories:
+    has_numeric = False
+    has_alphabetic = False
+    has_alphanumeric = False
+    observed = False
+
+    for entry in entries:
+        category = _classify_entry_cached(entry)
+        if category == "empty":
+            continue
+        observed = True
+        if category == "mixed":
+            return "mixed"
+        if category == "numeric":
+            has_numeric = True
+        elif category == "alphabetic":
+            has_alphabetic = True
+        elif category == "alphanumeric":
+            has_alphanumeric = True
+
+    if not observed:
         raise InvalidInputError("Unable to classify entries because they are empty.")
-    if "mixed" in categories:
-        return "mixed"
-    if categories <= {"numeric"}:
+    if has_numeric and not (has_alphabetic or has_alphanumeric):
         return "numeric"
-    if categories <= {"alphabetic"}:
+    if has_alphabetic and not (has_numeric or has_alphanumeric):
         return "alphabetic"
-    if categories <= {"numeric", "alphabetic", "alphanumeric"}:
+    if has_numeric or has_alphabetic or has_alphanumeric:
         return "alphanumeric"
     return "mixed"
 
@@ -104,11 +118,11 @@ def _classify_entry(entry: str) -> EntryCategory:
     stripped = entry.strip()
     if not stripped:
         return "empty"
-    if NUMERIC_PATTERN.match(stripped):
+    if NUMERIC_PATTERN.fullmatch(stripped):
         return "numeric"
-    if ALPHA_PATTERN.match(stripped):
+    if ALPHA_PATTERN.fullmatch(stripped):
         return "alphabetic"
-    if ALNUM_PATTERN.match(stripped):
+    if ALNUM_PATTERN.fullmatch(stripped):
         return "alphanumeric"
     return "mixed"
 
@@ -121,6 +135,20 @@ def _normalise_path(path: Path | str) -> Path:
     if isinstance(path, str) and re.match(r"^[A-Za-z]:\\", path):
         return Path(PureWindowsPath(path))
     return candidate.expanduser().resolve()
+
+
+def _strip_newlines(raw_lines: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Strip trailing newline characters while preserving tuple semantics."""
+
+    # Tuples are used to retain immutability guarantees for downstream stages.
+    return tuple(line.rstrip("\r\n") for line in raw_lines)
+
+
+@lru_cache(maxsize=2048)
+def _classify_entry_cached(entry: str) -> EntryCategory:
+    """Memoized wrapper around :func:`_classify_entry` for repeated tokens."""
+
+    return _classify_entry(entry)
 
 
 __all__ = [

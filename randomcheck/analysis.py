@@ -22,12 +22,17 @@ When the input data mixes different entry types (for example, alphabetic and
 numeric strings), a short justification note is added to the metadata of both
 the per-test results and the final summary.  This metadata can be rendered by
 reporting layers to explain why the analysis may require additional scrutiny.
+
+When available the module will transparently use NumPy to accelerate weighted
+aggregations while preserving pure Python fallbacks for environments without
+scientific libraries.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Sequence, Tuple
+from typing import Iterable, Sequence, Tuple
 
 from .io import EntryType
 from .tests.base import TestResult as RawTestResult
@@ -40,6 +45,12 @@ MIXED_DATA_JUSTIFICATION = (
     "signals so the overall confidence remains conservative."
 )
 """Explanation attached to metadata when mixed entry types are detected."""
+
+
+try:  # pragma: no cover - optional dependency guard
+    import numpy as _np  # type: ignore
+except Exception:  # pragma: no cover - optional dependency guard
+    _np = None
 
 
 @dataclass(frozen=True)
@@ -95,8 +106,8 @@ def merge_test_results(
     """
 
     analysed_results: list[MergedTestResult] = []
-    total_weight = 0.0
-    weighted_score = 0.0
+    weights: list[float] = []
+    p_values: list[float] = []
 
     metadata: Tuple[str, ...] = ()
     if entry_type == "mixed":
@@ -117,9 +128,11 @@ def merge_test_results(
                 metadata=result_metadata,
             )
         )
-        total_weight += weight
-        weighted_score += p_value * weight
+        weights.append(weight)
+        p_values.append(p_value)
 
+    total_weight = _vectorised_sum(weights)
+    weighted_score = _vectorised_dot(p_values, weights)
     confidence = (weighted_score / total_weight) if total_weight else 0.0
     confidence_pct = confidence * 100.0
     threshold_pct = confidence_threshold * 100.0
@@ -132,6 +145,25 @@ def merge_test_results(
         tests=tuple(analysed_results),
         metadata=metadata,
     )
+
+
+def _vectorised_sum(values: Iterable[float]) -> float:
+    """Return the sum of ``values`` using vectorised helpers when available."""
+
+    if _np is not None:
+        array = _np.asarray(tuple(values), dtype=float)
+        return float(array.sum())
+    return math.fsum(values)
+
+
+def _vectorised_dot(p_values: Sequence[float], weights: Sequence[float]) -> float:
+    """Return the weighted sum of ``p_values`` and ``weights``."""
+
+    if _np is not None:
+        pv_array = _np.asarray(p_values, dtype=float)
+        weight_array = _np.asarray(weights, dtype=float)
+        return float(pv_array.dot(weight_array))
+    return math.fsum(p * w for p, w in zip(p_values, weights))
 
 
 __all__ = [
