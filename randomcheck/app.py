@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import math
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, MutableMapping, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
+from .config import RandomCheckConfig, load_config
 from .errors import (
     InvalidConfigurationError,
     MissingFileError,
@@ -128,12 +129,18 @@ class RandomnessCheckerApp:
 
         entries = self._load_input(input_path)
         config = self._load_config(config_path)
+        for warning in config.warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
         active_tests = self._resolve_tests(config)
         threshold = self._resolve_threshold(config)
-        run_result = self._execute_tests(input_path, config_path, entries, active_tests, threshold)
-        self._render_summary(run_result, verbose=verbose)
-        if report_path is not None:
-            self._render_report(run_result, report_path)
+        effective_report = report_path or config.output.report_path
+        verbose_output = verbose or config.output.log_results
+        run_result = self._execute_tests(
+            input_path, config_path, entries, active_tests, threshold
+        )
+        self._render_summary(run_result, verbose=verbose_output)
+        if effective_report is not None:
+            self._render_report(run_result, effective_report)
         return run_result
 
     # ------------------------------------------------------------------
@@ -150,68 +157,26 @@ class RandomnessCheckerApp:
             raise MissingFileError(f"Could not read input file: {path}") from exc
         return entries
 
-    def _load_config(self, path: Path) -> MutableMapping[str, object]:
-        if not path.exists():
-            raise MissingFileError(f"Configuration file not found: {path}")
-        try:
-            with path.open("r", encoding="utf-8") as config_file:
-                data = json.load(config_file)
-        except json.JSONDecodeError as exc:
-            raise InvalidConfigurationError(f"Configuration is not valid JSON: {exc}") from exc
-        except OSError as exc:
-            raise MissingFileError(f"Could not read configuration file: {path}") from exc
-        if not isinstance(data, MutableMapping):
-            raise InvalidConfigurationError("Configuration root must be a JSON object.")
-        return data
+    def _load_config(self, path: Path) -> RandomCheckConfig:
+        return load_config(path)
 
-    def _resolve_tests(
-        self, config: MutableMapping[str, object]
-    ) -> List[Tuple[_BaseTest, float]]:
-        tests_section = config.get("tests")
+    def _resolve_tests(self, config: RandomCheckConfig) -> List[Tuple[_BaseTest, float]]:
         active_tests: List[Tuple[_BaseTest, float]] = []
-        if tests_section is None:
-            for test in self._tests.values():
-                active_tests.append((test, 1.0))
-            return active_tests
-        if not isinstance(tests_section, MutableMapping):
-            raise InvalidConfigurationError("The 'tests' section must be a JSON object mapping names to settings.")
-        for name, settings in tests_section.items():
+        for name in config.tests.enabled_tests:
             if name not in self._tests:
                 raise InvalidConfigurationError(f"Unknown test '{name}' in configuration.")
-            if settings is None:
-                enabled = True
-                weight = 1.0
-            elif isinstance(settings, MutableMapping):
-                enabled = bool(settings.get("enabled", True))
-                try:
-                    weight_value = settings.get("weight", 1.0)
-                    weight = float(weight_value)
-                except (TypeError, ValueError) as exc:
-                    raise InvalidConfigurationError(
-                        f"Weight for test '{name}' must be numeric."
-                    ) from exc
-            else:
+            weight = config.weights.values.get(name)
+            if weight is None:
                 raise InvalidConfigurationError(
-                    f"Settings for test '{name}' must be an object with 'enabled'/'weight' keys."
+                    f"No weight provided for enabled test '{name}'."
                 )
-            if not enabled:
-                continue
-            if weight <= 0:
-                raise InvalidConfigurationError(f"Weight for test '{name}' must be greater than zero.")
             active_tests.append((self._tests[name], weight))
         if not active_tests:
             raise InvalidConfigurationError("At least one test must be enabled in the configuration.")
         return active_tests
 
-    def _resolve_threshold(self, config: MutableMapping[str, object]) -> float:
-        threshold_value = config.get("confidence_threshold", 0.6)
-        try:
-            threshold = float(threshold_value)
-        except (TypeError, ValueError) as exc:
-            raise InvalidConfigurationError("'confidence_threshold' must be numeric.") from exc
-        if not 0.0 <= threshold <= 1.0:
-            raise InvalidConfigurationError("'confidence_threshold' must be between 0 and 1.")
-        return threshold
+    def _resolve_threshold(self, config: RandomCheckConfig) -> float:
+        return config.output.confidence_threshold
 
     def _execute_tests(
         self,
