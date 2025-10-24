@@ -7,12 +7,18 @@ import sys
 from pathlib import Path
 
 from .app import RandomnessCheckerApp
-from .errors import InvalidConfigurationError, MissingFileError, TestExecutionError
+from .errors import (
+    InvalidConfigurationError,
+    InvalidInputError,
+    MissingFileError,
+    TestExecutionError,
+)
 
 EXIT_SUCCESS = 0
 EXIT_MISSING_FILE = 2
 EXIT_INVALID_CONFIG = 3
 EXIT_TEST_FAILURE = 4
+EXIT_INVALID_INPUT = 5
 EXIT_UNEXPECTED_ERROR = 1
 
 
@@ -66,6 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     except InvalidConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return EXIT_INVALID_CONFIG
+    except InvalidInputError as exc:
+        print(f"Input error: {exc}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
     except TestExecutionError as exc:
         print(f"Test execution failed: {exc}", file=sys.stderr)
         return EXIT_TEST_FAILURE

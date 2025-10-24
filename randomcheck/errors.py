@@ -17,3 +17,15 @@ class InvalidConfigurationError(RandomnessCheckerError):
 
 class TestExecutionError(RandomnessCheckerError):
     """Raised when one or more randomness tests fail to execute."""
+
+
+class InvalidInputError(RandomnessCheckerError):
+    """Raised when the provided input data does not meet application constraints."""
+
+
+class EmptyInputFileError(InvalidInputError):
+    """Raised when the input file does not contain any usable entries."""
+
+
+class InputTooLargeError(InvalidInputError):
+    """Raised when the input file exceeds the supported number of entries."""
