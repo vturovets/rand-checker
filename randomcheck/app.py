@@ -7,26 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from .analysis import MergedTestResult, OverallResult, merge_test_results
 from .config import RandomCheckConfig, load_config
-from .errors import InvalidConfigurationError, TestExecutionError
+from .errors import TestExecutionError
 from .io import EntryType, InputData, read_input_file
 from .tests import DEFAULT_TESTS, RandomnessTest, build_test_suite
-
-
-@dataclass(frozen=True)
-class TestResult:
-    """Container with the outcome of a single randomness test."""
-
-    name: str
-    score: float
-    weight: float
-    details: str
-
-    @property
-    def passed(self) -> bool:
-        """Return whether the test considered the input random enough."""
-
-        return self.score >= 0.5
+from .tests.base import TestResult as RawTestResult
 
 
 @dataclass(frozen=True)
@@ -37,10 +23,11 @@ class RunResult:
     config_path: Path
     total_entries: int
     entry_type: EntryType
-    overall_score: float
+    overall_confidence: float
     is_random: bool
     confidence_threshold: float
-    test_results: Sequence[TestResult]
+    test_results: Sequence[MergedTestResult]
+    report_metadata: Sequence[str]
 
 
 class RandomnessCheckerApp:
@@ -112,36 +99,29 @@ class RandomnessCheckerApp:
         tests: Sequence[Tuple[RandomnessTest, float]],
         threshold: float,
     ) -> RunResult:
-        test_results: List[TestResult] = []
-        total_weight = 0.0
-        weighted_score = 0.0
+        weighted_outcomes: List[Tuple[str, float, RawTestResult]] = []
         for test, weight in tests:
             try:
                 outcome = test.run(input_data)
             except Exception as exc:  # pragma: no cover - defensive guard
                 raise TestExecutionError(f"Test '{test.name}' failed to execute.") from exc
-            score = max(0.0, min(1.0, float(outcome.p_value)))
-            test_results.append(
-                TestResult(
-                    name=test.name,
-                    score=score,
-                    weight=weight,
-                    details=outcome.details,
-                )
-            )
-            total_weight += weight
-            weighted_score += score * weight
-        overall_score = weighted_score / total_weight if total_weight > 0 else 0.0
-        is_random = overall_score >= threshold
+            weighted_outcomes.append((test.name, weight, outcome))
+
+        overall: OverallResult = merge_test_results(
+            weighted_outcomes,
+            confidence_threshold=threshold,
+            entry_type=input_data.entry_type,
+        )
         return RunResult(
             input_path=input_path,
             config_path=config_path,
             total_entries=input_data.entry_count,
             entry_type=input_data.entry_type,
-            overall_score=overall_score,
-            is_random=is_random,
-            confidence_threshold=threshold,
-            test_results=test_results,
+            overall_confidence=overall.confidence,
+            is_random=overall.passed,
+            confidence_threshold=overall.threshold / 100.0,
+            test_results=overall.tests,
+            report_metadata=overall.metadata,
         )
 
     # ------------------------------------------------------------------
@@ -149,16 +129,19 @@ class RandomnessCheckerApp:
     # ------------------------------------------------------------------
     def _render_summary(self, result: RunResult, *, verbose: bool) -> None:
         status = "RANDOM" if result.is_random else "NON-RANDOM"
-        overall = result.overall_score * 100
+        overall = result.overall_confidence
         print(f"Result: {status} | Confidence: {overall:.1f}%")
         if verbose:
             print(f"Detected entry type: {result.entry_type}")
             for test_result in result.test_results:
-                score_pct = test_result.score * 100
+                score_pct = test_result.p_value * 100
                 print(
                     f" - {test_result.name}: {score_pct:.1f}% (weight {test_result.weight})\n   {test_result.details}"
                 )
-            print(f"Threshold: {result.confidence_threshold:.2f}")
+                if test_result.metadata:
+                    for note in test_result.metadata:
+                        print(f"   note: {note}")
+            print(f"Threshold: {result.confidence_threshold * 100:.2f}%")
 
     def _render_report(self, result: RunResult, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,7 +153,7 @@ class RandomnessCheckerApp:
             f"**Total entries:** {result.total_entries}",
             f"**Detected type:** {result.entry_type}",
             "",
-            f"**Overall confidence:** {result.overall_score * 100:.2f}%",
+            f"**Overall confidence:** {result.overall_confidence:.2f}%",
             f"**Threshold:** {result.confidence_threshold * 100:.2f}%",
             f"**Result:** {'RANDOM' if result.is_random else 'NON-RANDOM'}",
             "",
@@ -180,15 +163,21 @@ class RandomnessCheckerApp:
             lines.extend(
                 [
                     f"### {test_result.name}",
-                    f"Score: {test_result.score * 100:.2f}%",
+                    f"Score: {test_result.p_value * 100:.2f}%",
                     f"Weight: {test_result.weight}",
                     "Details:",
                     f"{test_result.details}",
-                    "",
                 ]
             )
+            if test_result.metadata:
+                lines.append("Notes:")
+                lines.extend(f"- {note}" for note in test_result.metadata)
+            lines.append("")
+        if result.report_metadata:
+            lines.append("## Analysis Notes")
+            lines.extend(f"- {note}" for note in result.report_metadata)
         report_content = "\n".join(lines)
         path.write_text(report_content, encoding="utf-8")
 
 
-__all__ = ["RandomnessCheckerApp", "RunResult", "TestResult"]
+__all__ = ["RandomnessCheckerApp", "RunResult", "MergedTestResult"]

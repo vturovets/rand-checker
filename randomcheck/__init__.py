@@ -1,9 +1,11 @@
 """Randomness checker package."""
 
-from .app import RandomnessCheckerApp, RunResult, TestResult
+from .analysis import MergedTestResult, OverallResult
+from .app import RandomnessCheckerApp, RunResult
 
 __all__ = [
     "RandomnessCheckerApp",
     "RunResult",
-    "TestResult",
+    "MergedTestResult",
+    "OverallResult",
 ]
