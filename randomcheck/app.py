@@ -15,6 +15,7 @@ from .errors import TestExecutionError
 from .io import EntryType, InputData, read_input_file
 from .tests import DEFAULT_TESTS, RandomnessTest, build_test_suite
 from .tests.base import TestResult as RawTestResult
+from . import logging as run_logging
 from . import reporting
 
 
@@ -91,7 +92,9 @@ class RandomnessCheckerApp:
             duration=duration,
         )
         self._render_summary(run_result, verbose=verbose_output)
-        self._render_report(run_result, effective_report)
+        report_file = self._render_report(run_result, effective_report)
+        if config.output.log_results:
+            self._log_run(run_result, config, report_file)
         return run_result
 
     # ------------------------------------------------------------------
@@ -140,8 +143,18 @@ class RandomnessCheckerApp:
     def _render_summary(self, result: RunResult, *, verbose: bool) -> None:
         reporting.print_console_summary(result, verbose=verbose)
 
-    def _render_report(self, result: RunResult, path: Path | None) -> None:
-        reporting.write_markdown_report(result, path=path)
+    def _render_report(self, result: RunResult, path: Path | None) -> Path:
+        return reporting.write_markdown_report(result, path=path)
+
+    def _log_run(self, result: RunResult, config: RandomCheckConfig, report_path: Path) -> None:
+        retention = config.output.run_log_retention
+        run_logging.log_run_result(
+            result,
+            report_path,
+            log_path=config.output.run_log_path,
+            fmt=config.output.run_log_format,
+            retention=retention,
+        )
 
 
 __all__ = ["RandomnessCheckerApp", "RunResult", "MergedTestResult"]

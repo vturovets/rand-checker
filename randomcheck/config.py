@@ -34,6 +34,9 @@ class OutputSection:
     log_results: bool
     confidence_threshold: float
     report_path: Path | None
+    run_log_path: Path
+    run_log_format: str
+    run_log_retention: int | None
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,62 @@ def _parse_output(
     log_results = False
     confidence_threshold = 0.6
     report_path: Path | None = None
+    base_dir = config_path.resolve().parent
+    default_log_path = (base_dir / "logs" / "run_log.jsonl").resolve()
+    log_path = default_log_path
+    log_format = "jsonl"
+    log_retention: int | None = 100
+
+    def _apply_logging_overrides(
+        section: configparser.SectionProxy, *, section_name: str, allow_enable: bool = False
+    ) -> None:
+        nonlocal log_results, log_path, log_format, log_retention
+        if allow_enable and "enabled" in section:
+            try:
+                log_results = section.getboolean("enabled")
+            except ValueError as exc:
+                raise InvalidConfigurationError(
+                    "Option 'enabled' in [logging] must be a boolean value."
+                ) from exc
+        if "log_results" in section:
+            try:
+                log_results = section.getboolean("log_results")
+            except ValueError as exc:
+                raise InvalidConfigurationError(
+                    f"Option 'log_results' in [{section_name}] must be a boolean value."
+                ) from exc
+        for key in ("log_path", "path"):
+            if key in section:
+                raw_path = section[key].strip()
+                if raw_path:
+                    candidate = Path(raw_path).expanduser()
+                    if not candidate.is_absolute():
+                        candidate = (base_dir / candidate).resolve()
+                    else:
+                        candidate = candidate.resolve()
+                    log_path = candidate
+                break
+        for key in ("log_format", "format"):
+            if key in section:
+                raw_format = section[key].strip().lower()
+                if raw_format not in {"jsonl", "csv"}:
+                    raise InvalidConfigurationError(
+                        f"Option '{key}' in [{section_name}] must be either 'jsonl' or 'csv'."
+                    )
+                log_format = raw_format
+                break
+        for key in ("log_retention", "retention"):
+            if key in section:
+                raw_retention = section[key].strip()
+                if raw_retention:
+                    try:
+                        parsed = int(raw_retention)
+                    except ValueError as exc:
+                        raise InvalidConfigurationError(
+                            f"Option '{key}' in [{section_name}] must be an integer value."
+                        ) from exc
+                    log_retention = parsed if parsed > 0 else None
+                break
 
     if parser.has_section("output"):
         section = parser["output"]
@@ -172,6 +231,11 @@ def _parse_output(
                 if not candidate.is_absolute():
                     candidate = (config_path.parent / candidate).resolve()
                 report_path = candidate
+        _apply_logging_overrides(section, section_name="output")
+
+    if parser.has_section("logging"):
+        section = parser["logging"]
+        _apply_logging_overrides(section, section_name="logging", allow_enable=True)
 
     if not 0.0 <= confidence_threshold <= 1.0:
         raise InvalidConfigurationError(
@@ -182,6 +246,9 @@ def _parse_output(
         log_results=log_results,
         confidence_threshold=confidence_threshold,
         report_path=report_path,
+        run_log_path=log_path,
+        run_log_format=log_format,
+        run_log_retention=log_retention,
     )
 
 
