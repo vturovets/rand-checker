@@ -10,11 +10,8 @@ from pathlib import Path
 from typing import List, Sequence, Tuple
 
 from .config import RandomCheckConfig, load_config
-from .errors import (
-    InvalidConfigurationError,
-    MissingFileError,
-    TestExecutionError,
-)
+from .errors import InvalidConfigurationError, TestExecutionError
+from .io import EntryType, InputData, read_input_file
 
 
 @dataclass(frozen=True)
@@ -40,6 +37,7 @@ class RunResult:
     input_path: Path
     config_path: Path
     total_entries: int
+    entry_type: EntryType
     overall_score: float
     is_random: bool
     confidence_threshold: float
@@ -50,6 +48,12 @@ class _BaseTest:
     """Base class for the built-in heuristics."""
 
     name: str
+    supported_entry_types: Tuple[EntryType, ...] = (
+        "numeric",
+        "alphabetic",
+        "alphanumeric",
+        "mixed",
+    )
 
     def run(self, entries: Sequence[str]) -> Tuple[float, str]:
         raise NotImplementedError
@@ -127,16 +131,20 @@ class RandomnessCheckerApp:
     ) -> RunResult:
         """Execute the randomness checker workflow."""
 
-        entries = self._load_input(input_path)
+        input_data = self._load_input(input_path)
         config = self._load_config(config_path)
         for warning in config.warnings:
             print(f"Warning: {warning}", file=sys.stderr)
-        active_tests = self._resolve_tests(config)
+        active_tests = self._resolve_tests(config, input_data.entry_type)
         threshold = self._resolve_threshold(config)
         effective_report = report_path or config.output.report_path
         verbose_output = verbose or config.output.log_results
         run_result = self._execute_tests(
-            input_path, config_path, entries, active_tests, threshold
+            input_path,
+            config_path,
+            input_data,
+            active_tests,
+            threshold,
         )
         self._render_summary(run_result, verbose=verbose_output)
         if effective_report is not None:
@@ -146,21 +154,15 @@ class RandomnessCheckerApp:
     # ------------------------------------------------------------------
     # Pipeline stages
     # ------------------------------------------------------------------
-    def _load_input(self, path: Path) -> List[str]:
-        if not path.exists():
-            raise MissingFileError(f"Input file not found: {path}")
-        try:
-            with path.open("r", encoding="utf-8") as input_file:
-                # Strip newline characters but preserve empty strings intentionally entered
-                entries = [line.rstrip("\n") for line in input_file]
-        except OSError as exc:
-            raise MissingFileError(f"Could not read input file: {path}") from exc
-        return entries
+    def _load_input(self, path: Path) -> InputData:
+        return read_input_file(path)
 
     def _load_config(self, path: Path) -> RandomCheckConfig:
         return load_config(path)
 
-    def _resolve_tests(self, config: RandomCheckConfig) -> List[Tuple[_BaseTest, float]]:
+    def _resolve_tests(
+        self, config: RandomCheckConfig, entry_type: EntryType
+    ) -> List[Tuple[_BaseTest, float]]:
         active_tests: List[Tuple[_BaseTest, float]] = []
         for name in config.tests.enabled_tests:
             if name not in self._tests:
@@ -170,7 +172,12 @@ class RandomnessCheckerApp:
                 raise InvalidConfigurationError(
                     f"No weight provided for enabled test '{name}'."
                 )
-            active_tests.append((self._tests[name], weight))
+            test = self._tests[name]
+            if entry_type not in test.supported_entry_types:
+                raise InvalidConfigurationError(
+                    f"Test '{name}' is not compatible with detected input type '{entry_type}'."
+                )
+            active_tests.append((test, weight))
         if not active_tests:
             raise InvalidConfigurationError("At least one test must be enabled in the configuration.")
         return active_tests
@@ -182,13 +189,14 @@ class RandomnessCheckerApp:
         self,
         input_path: Path,
         config_path: Path,
-        entries: Sequence[str],
+        input_data: InputData,
         tests: Sequence[Tuple[_BaseTest, float]],
         threshold: float,
     ) -> RunResult:
         test_results: List[TestResult] = []
         total_weight = 0.0
         weighted_score = 0.0
+        entries = input_data.entries
         for test, weight in tests:
             try:
                 score, details = test.run(entries)
@@ -203,7 +211,8 @@ class RandomnessCheckerApp:
         return RunResult(
             input_path=input_path,
             config_path=config_path,
-            total_entries=len(entries),
+            total_entries=input_data.entry_count,
+            entry_type=input_data.entry_type,
             overall_score=overall_score,
             is_random=is_random,
             confidence_threshold=threshold,
@@ -218,6 +227,7 @@ class RandomnessCheckerApp:
         overall = result.overall_score * 100
         print(f"Result: {status} | Confidence: {overall:.1f}%")
         if verbose:
+            print(f"Detected entry type: {result.entry_type}")
             for test_result in result.test_results:
                 score_pct = test_result.score * 100
                 print(
@@ -233,6 +243,7 @@ class RandomnessCheckerApp:
             f"**Input file:** {result.input_path}",
             f"**Configuration:** {result.config_path}",
             f"**Total entries:** {result.total_entries}",
+            f"**Detected type:** {result.entry_type}",
             "",
             f"**Overall confidence:** {result.overall_score * 100:.2f}%",
             f"**Threshold:** {result.confidence_threshold * 100:.2f}%",
