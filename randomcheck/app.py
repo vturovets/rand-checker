@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
@@ -13,6 +15,7 @@ from .errors import TestExecutionError
 from .io import EntryType, InputData, read_input_file
 from .tests import DEFAULT_TESTS, RandomnessTest, build_test_suite
 from .tests.base import TestResult as RawTestResult
+from . import reporting
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,8 @@ class RunResult:
     confidence_threshold: float
     test_results: Sequence[MergedTestResult]
     report_metadata: Sequence[str]
+    started_at: datetime
+    duration: timedelta
 
 
 class RandomnessCheckerApp:
@@ -54,6 +59,8 @@ class RandomnessCheckerApp:
     ) -> RunResult:
         """Execute the randomness checker workflow."""
 
+        started_at = datetime.now(timezone.utc)
+        timer_start = time.perf_counter()
         input_data = self._load_input(input_path)
         config = self._load_config(config_path)
         for warning in config.warnings:
@@ -62,16 +69,29 @@ class RandomnessCheckerApp:
         threshold = self._resolve_threshold(config)
         effective_report = report_path or config.output.report_path
         verbose_output = verbose or config.output.log_results
-        run_result = self._execute_tests(
+        overall = self._execute_tests(
             input_path,
             config_path,
             input_data,
             active_tests,
             threshold,
         )
+        duration = timedelta(seconds=time.perf_counter() - timer_start)
+        run_result = RunResult(
+            input_path=input_path,
+            config_path=config_path,
+            total_entries=input_data.entry_count,
+            entry_type=input_data.entry_type,
+            overall_confidence=overall.confidence,
+            is_random=overall.passed,
+            confidence_threshold=overall.threshold / 100.0,
+            test_results=overall.tests,
+            report_metadata=overall.metadata,
+            started_at=started_at,
+            duration=duration,
+        )
         self._render_summary(run_result, verbose=verbose_output)
-        if effective_report is not None:
-            self._render_report(run_result, effective_report)
+        self._render_report(run_result, effective_report)
         return run_result
 
     # ------------------------------------------------------------------
@@ -98,7 +118,7 @@ class RandomnessCheckerApp:
         input_data: InputData,
         tests: Sequence[Tuple[RandomnessTest, float]],
         threshold: float,
-    ) -> RunResult:
+    ) -> OverallResult:
         weighted_outcomes: List[Tuple[str, float, RawTestResult]] = []
         for test, weight in tests:
             try:
@@ -112,72 +132,16 @@ class RandomnessCheckerApp:
             confidence_threshold=threshold,
             entry_type=input_data.entry_type,
         )
-        return RunResult(
-            input_path=input_path,
-            config_path=config_path,
-            total_entries=input_data.entry_count,
-            entry_type=input_data.entry_type,
-            overall_confidence=overall.confidence,
-            is_random=overall.passed,
-            confidence_threshold=overall.threshold / 100.0,
-            test_results=overall.tests,
-            report_metadata=overall.metadata,
-        )
+        return overall
 
     # ------------------------------------------------------------------
     # Rendering helpers
     # ------------------------------------------------------------------
     def _render_summary(self, result: RunResult, *, verbose: bool) -> None:
-        status = "RANDOM" if result.is_random else "NON-RANDOM"
-        overall = result.overall_confidence
-        print(f"Result: {status} | Confidence: {overall:.1f}%")
-        if verbose:
-            print(f"Detected entry type: {result.entry_type}")
-            for test_result in result.test_results:
-                score_pct = test_result.p_value * 100
-                print(
-                    f" - {test_result.name}: {score_pct:.1f}% (weight {test_result.weight})\n   {test_result.details}"
-                )
-                if test_result.metadata:
-                    for note in test_result.metadata:
-                        print(f"   note: {note}")
-            print(f"Threshold: {result.confidence_threshold * 100:.2f}%")
+        reporting.print_console_summary(result, verbose=verbose)
 
-    def _render_report(self, result: RunResult, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            "# Randomness Checker Report",
-            "",
-            f"**Input file:** {result.input_path}",
-            f"**Configuration:** {result.config_path}",
-            f"**Total entries:** {result.total_entries}",
-            f"**Detected type:** {result.entry_type}",
-            "",
-            f"**Overall confidence:** {result.overall_confidence:.2f}%",
-            f"**Threshold:** {result.confidence_threshold * 100:.2f}%",
-            f"**Result:** {'RANDOM' if result.is_random else 'NON-RANDOM'}",
-            "",
-            "## Test Breakdown",
-        ]
-        for test_result in result.test_results:
-            lines.extend(
-                [
-                    f"### {test_result.name}",
-                    f"Score: {test_result.p_value * 100:.2f}%",
-                    f"Weight: {test_result.weight}",
-                    "Details:",
-                    f"{test_result.details}",
-                ]
-            )
-            if test_result.metadata:
-                lines.append("Notes:")
-                lines.extend(f"- {note}" for note in test_result.metadata)
-            lines.append("")
-        if result.report_metadata:
-            lines.append("## Analysis Notes")
-            lines.extend(f"- {note}" for note in result.report_metadata)
-        report_content = "\n".join(lines)
-        path.write_text(report_content, encoding="utf-8")
+    def _render_report(self, result: RunResult, path: Path | None) -> None:
+        reporting.write_markdown_report(result, path=path)
 
 
 __all__ = ["RandomnessCheckerApp", "RunResult", "MergedTestResult"]
